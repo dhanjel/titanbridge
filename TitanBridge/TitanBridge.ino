@@ -12,8 +12,9 @@
 
 // ── CONFIG ────────────────────────────────────────────────────────────────
 static const char* TREADMILL_ADDR = "c8:1f:c2:2a:90:40";
-static NimBLEUUID  ftmsServiceUUID("1826");   // Fitness Machine Service
-static NimBLEUUID  treadmillDataUUID("2ad3"); // Treadmill Data characteristic
+static NimBLEUUID  ftmsServiceUUID("1826");      // Fitness Machine Service
+static NimBLEUUID  treadmillDataUUID("2ad3");    // Treadmill Data characteristic
+static NimBLEUUID  ftmsStatusUUID("2ada");       // Fitness Machine Status
 
 #define RSC_SERVICE_UUID      "1814"
 #define RSC_MEASUREMENT_UUID  "2a53"
@@ -81,18 +82,25 @@ void sendRSCUpdate() {
     if (!deviceConnected) return;
 
     xSemaphoreTake(dataMutex, portMAX_DELAY);
-    float   spd = currentSpeed_mps;
-    uint8_t cad = currentCadence;
+    float    spd     = currentSpeed_mps;
+    uint8_t  cad     = currentCadence;
+    uint32_t dist_dm = (uint32_t)(totalDistance_m * 10.0f);  // units: 1/10 m
     xSemaphoreGive(dataMutex);
 
-    uint8_t  flags     = (spd > 0) ? 0x02 : 0x00;  // bit1 = Running (vs Walking)
+    // Bit 1 (0x02) = Total Distance Present, Bit 2 (0x04) = Running (vs Walking)
+    uint8_t  flags     = 0x02 | ((spd > 0) ? 0x04 : 0x00);
     uint16_t speed_rsc = (uint16_t)(spd * 256.0f);  // units: 1/256 m/s
 
-    uint8_t rscData[4] = {
+    // RSC Measurement: flags(1) + speed(2) + cadence(1) + total_distance(4) = 8 bytes
+    uint8_t rscData[8] = {
         flags,
         (uint8_t)(speed_rsc & 0xFF),
         (uint8_t)((speed_rsc >> 8) & 0xFF),
-        cad
+        cad,
+        (uint8_t)(dist_dm & 0xFF),
+        (uint8_t)((dist_dm >> 8) & 0xFF),
+        (uint8_t)((dist_dm >> 16) & 0xFF),
+        (uint8_t)((dist_dm >> 24) & 0xFF),
     };
 
     pRSCMeasurement->setValue(rscData, sizeof(rscData));
@@ -104,7 +112,7 @@ void sendRSCUpdate() {
 void pushZigbee(float spd_mps, uint8_t cadence, float dist_m, bool running) {
     if (!Zigbee.connected()) return;
 
-    zbSpeed.setWindSpeed(spd_mps * 100.0f);   // m/s → units of 0.01 m/s
+    zbSpeed.setWindSpeed(spd_mps);   // setWindSpeed() takes m/s, converts internally
     zbSpeed.reportWindSpeed();
 
     zbRunning.setOccupancy(running);
@@ -114,13 +122,27 @@ void pushZigbee(float spd_mps, uint8_t cadence, float dist_m, bool running) {
 // ── TREADMILL DATA CALLBACK ───────────────────────────────────────────────
 void notifyCallback(NimBLERemoteCharacteristic* pChar,
                     uint8_t* pData, size_t length, bool isNotify) {
+    if (length < 2) return;
+
+    uint16_t flags = (uint16_t)pData[0] | ((uint16_t)pData[1] << 8);
+
+    // Log every packet for diagnostics
+    Serial.printf("T data len=%d flags=%04x:", length, flags);
+    for (size_t i = 0; i < length && i < 8; i++) Serial.printf(" %02x", pData[i]);
+    Serial.println();
+
+    // Bit 0 (More Data): when set, instantaneous speed is absent from this packet.
+    // The treadmill sends multi-packet updates; speed is in the final packet (bit 0 = 0).
+    if (flags & 0x0001) return;
+
     if (length < 4) return;
 
-    // FTMS Treadmill Data (0x2AD3): bytes 0-1 = flags, bytes 2-3 = speed in 0.01 km/h
+    // Speed is at bytes 2-3 when More Data bit is clear (0.01 km/h units)
     uint16_t speed_raw = (uint16_t)pData[2] | ((uint16_t)pData[3] << 8);
     float    speed_kmh = speed_raw / 100.0f;
     float    spd_mps   = speed_kmh / 3.6f;
     uint8_t  cadence   = (speed_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
+    Serial.printf("spd=%.2fkmh cad=%d\n", speed_kmh, cadence);
 
     // Accumulate distance: integrate speed over time since last packet
     unsigned long now = millis();
@@ -145,13 +167,13 @@ class TreadmillClientCallbacks : public NimBLEClientCallbacks {
     }
     void onDisconnect(NimBLEClient* pClient, int reason) override {
         treadmillConnected = false;
-        // Push zero speed / not running to Zigbee on disconnect
         xSemaphoreTake(dataMutex, portMAX_DELAY);
         currentSpeed_mps = 0.0f;
         currentCadence   = 0;
         lastDataMs       = 0;
         xSemaphoreGive(dataMutex);
-        pushZigbee(0.0f, 0, totalDistance_m, false);
+        // Mark client for recreation — stale client causes reconnect failures
+        pTreadmillClient = nullptr;
         Serial.printf("T- reason=%d\n", reason);
     }
 };
@@ -165,10 +187,7 @@ class GarminServerCallbacks : public NimBLEServerCallbacks {
     }
     void onDisconnect(NimBLEServer* pSrv, NimBLEConnInfo& connInfo, int reason) override {
         deviceConnected = false;
-        treadmillConnected = false;
-        if (pTreadmillClient && pTreadmillClient->isConnected()) {
-            pTreadmillClient->disconnect();
-        }
+        // Keep treadmill connected so Zigbee keeps reporting while Garmin is away
         if (Zigbee.connected()) { zbGarmin.setOccupancy(false); zbGarmin.report(); }
         Serial.printf("D reason=%d\n", reason);
         NimBLEDevice::startAdvertising();
@@ -181,20 +200,16 @@ class GarminServerCallbacks : public NimBLEServerCallbacks {
 // ── TREADMILL TASK ────────────────────────────────────────────────────────
 void treadmillTask(void* param) {
     for (;;) {
-        if (!deviceConnected) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
-
         if (treadmillConnected) {
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
-        // Grace period: let Garmin finish GATT discovery before we use the radio
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        // If Garmin is connected, give it time to finish GATT discovery first
+        if (deviceConnected) vTaskDelay(pdMS_TO_TICKS(3000));
 
-        if (!deviceConnected) continue;
+        // Pause advertising during connect() so Garmin doesn't collide with it
+        NimBLEDevice::stopAdvertising();
 
         Serial.println("T?");
 
@@ -207,9 +222,13 @@ void treadmillTask(void* param) {
         NimBLEAddress addr(TREADMILL_ADDR, BLE_ADDR_PUBLIC);
         if (!pTreadmillClient->connect(addr)) {
             Serial.println("T! connect failed");
+            NimBLEDevice::startAdvertising();
             vTaskDelay(pdMS_TO_TICKS(TREADMILL_RETRY_MS));
             continue;
         }
+
+        // Treadmill connected — resume advertising so Garmin can connect
+        NimBLEDevice::startAdvertising();
 
         NimBLERemoteService* pSvc = pTreadmillClient->getService(ftmsServiceUUID);
         if (!pSvc) {
@@ -220,18 +239,100 @@ void treadmillTask(void* param) {
         }
 
         NimBLERemoteCharacteristic* pChar = pSvc->getCharacteristic(treadmillDataUUID);
-        if (!pChar || !pChar->canNotify()) {
+        if (!pChar) {
             Serial.println("T! no TreadData char");
             pTreadmillClient->disconnect();
             vTaskDelay(pdMS_TO_TICKS(TREADMILL_RETRY_MS));
             continue;
         }
 
-        if (!pChar->subscribe(true, notifyCallback)) {
-            Serial.println("T! subscribe failed");
-            pTreadmillClient->disconnect();
-            vTaskDelay(pdMS_TO_TICKS(TREADMILL_RETRY_MS));
-            continue;
+        // Subscribe with delays between each CCCD write — some treadmill BLE
+        // stacks silently drop CCCDs written in rapid succession.
+
+        // Subscribe only to Treadmill Data — test whether other subscriptions interfere
+        bool subOk = false;
+        if (pChar->canNotify()) {
+            subOk = pChar->subscribe(true, notifyCallback);
+        }
+        Serial.printf("sub 2AD3: %d\n", subOk);
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        // Training Status (0x2ACD) — proprietary 19-byte packet; bytes 4-5 = set speed (0.1 km/h)
+        NimBLERemoteCharacteristic* pTraining = pSvc->getCharacteristic(NimBLEUUID("2acd"));
+        if (pTraining && pTraining->canNotify()) {
+            bool ok = pTraining->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* d, size_t l, bool) {
+                Serial.printf("TRST len=%d:", l);
+                for (size_t i = 0; i < l; i++) Serial.printf(" %02x", d[i]);
+                Serial.println();
+
+                if (l < 6) return;  // need at least bytes 0-5
+
+                // Bytes 2-3: actual belt speed in 0.01 km/h units (FTMS standard)
+                // Bytes 4-5: set/target speed in 0.1 km/h units — logged for reference
+                uint16_t set_raw   = (uint16_t)d[4] | ((uint16_t)d[5] << 8);
+                uint16_t speed_raw = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+                float    speed_kmh = speed_raw / 100.0f;
+                float    spd_mps   = speed_kmh / 3.6f;
+                uint8_t  cadence   = (speed_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
+                Serial.printf("TRST actual=%.2fkmh set=%.1fkmh cad=%d\n",
+                              speed_kmh, set_raw * 0.1f, cadence);
+
+                unsigned long now = millis();
+                xSemaphoreTake(dataMutex, portMAX_DELAY);
+                if (lastDataMs > 0 && currentSpeed_mps > 0) {
+                    totalDistance_m += currentSpeed_mps * ((now - lastDataMs) / 1000.0f);
+                }
+                currentSpeed_mps = spd_mps;
+                currentCadence   = cadence;
+                lastDataMs       = now;
+                float dist_snap  = totalDistance_m;
+                xSemaphoreGive(dataMutex);
+
+                sendRSCUpdate();
+                pushZigbee(spd_mps, cadence, dist_snap, speed_raw > 0);
+            });
+            Serial.printf("sub TRST: %d\n", ok);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+
+        // Machine Status — opcode 0x08 = Target Speed Changed (uint16 in 0.01 km/h follows)
+        NimBLERemoteCharacteristic* pStatus = pSvc->getCharacteristic(ftmsStatusUUID);
+        if (pStatus && pStatus->canNotify()) {
+            bool ok = pStatus->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* d, size_t l, bool) {
+                Serial.printf("FMST len=%d:", l);
+                for (size_t i = 0; i < l; i++) Serial.printf(" %02x", d[i]);
+                Serial.println();
+
+                if (l >= 3 && d[0] == 0x08) {  // Target Speed Changed
+                    uint16_t spd_raw  = (uint16_t)d[1] | ((uint16_t)d[2] << 8);
+                    float    speed_kmh = spd_raw / 100.0f;
+                    float    spd_mps   = speed_kmh / 3.6f;
+                    uint8_t  cadence   = (spd_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
+                    Serial.printf("FMST spd=%.2fkmh cad=%d\n", speed_kmh, cadence);
+
+                    unsigned long now = millis();
+                    xSemaphoreTake(dataMutex, portMAX_DELAY);
+                    if (lastDataMs > 0 && currentSpeed_mps > 0)
+                        totalDistance_m += currentSpeed_mps * ((now - lastDataMs) / 1000.0f);
+                    currentSpeed_mps = spd_mps;
+                    currentCadence   = cadence;
+                    lastDataMs       = now;
+                    float dist_snap  = totalDistance_m;
+                    xSemaphoreGive(dataMutex);
+
+                    sendRSCUpdate();
+                    pushZigbee(spd_mps, cadence, dist_snap, spd_raw > 0);
+                }
+            });
+            Serial.printf("sub FMST: %d\n", ok);
+        }
+
+        // Read 0x2AD3 once at connect to get current speed (not just relying on notifications)
+        {
+            std::string val = pChar->readValue();
+            Serial.printf("2AD3 read len=%d:", (int)val.length());
+            for (size_t i = 0; i < val.length(); i++) Serial.printf(" %02x", (uint8_t)val[i]);
+            Serial.println();
         }
 
         treadmillConnected = true;
@@ -245,9 +346,6 @@ void setup() {
     Serial.setTxTimeoutMs(0);
     delay(200);
     Serial.println("Boot");
-
-    // Zigbee factory reset to clear stale NVS pairing state
-    Zigbee.factoryReset(false);  // false = don't reboot, just clear NVS
 
     dataMutex = xSemaphoreCreateMutex();
 
