@@ -17,8 +17,8 @@ ESP32-C6 (Seeed XIAO ESP32-C6) firmware that bridges a Titan treadmill to a Garm
 ## Build & flash
 
 ```bash
-bin/arduino-cli compile --fqbn "esp32:esp32:XIAO_ESP32C6:ZigbeeMode=ed,PartitionScheme=zigbee" TitanBridge
-bin/arduino-cli upload  --fqbn "esp32:esp32:XIAO_ESP32C6:ZigbeeMode=ed,PartitionScheme=zigbee" --port /dev/ttyACM0 TitanBridge
+bin/arduino-cli compile --fqbn "esp32:esp32:XIAO_ESP32C6:ZigbeeMode=ed,PartitionScheme=zigbee" titanbridge
+bin/arduino-cli upload  --fqbn "esp32:esp32:XIAO_ESP32C6:ZigbeeMode=ed,PartitionScheme=zigbee" --port /dev/ttyACM0 titanbridge
 ```
 
 **Both** FQBN options are required — `ZigbeeMode=ed` and `PartitionScheme=zigbee`. Using the default partition scheme causes a boot crash.
