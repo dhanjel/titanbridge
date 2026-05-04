@@ -253,8 +253,6 @@ void treadmillTask(void* param) {
 
         // Subscribe with delays between each CCCD write — some treadmill BLE
         // stacks silently drop CCCDs written in rapid succession.
-
-        // Subscribe only to Treadmill Data — test whether other subscriptions interfere
         bool subOk = false;
         if (pChar->canNotify()) {
             subOk = pChar->subscribe(true, notifyCallback);
