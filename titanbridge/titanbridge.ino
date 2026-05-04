@@ -121,6 +121,26 @@ void pushZigbee(float spd_mps, uint8_t cadence, float dist_m, bool running) {
     zbRunning.report();
 }
 
+// ── SPEED PACKET HANDLER ─────────────────────────────────────────────────
+void handleSpeedRaw(uint16_t speed_raw) {
+    float   speed_kmh = speed_raw / 100.0f;
+    float   spd_mps   = speed_kmh / 3.6f;
+    uint8_t cadence   = (speed_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
+
+    unsigned long now = millis();
+    xSemaphoreTake(dataMutex, portMAX_DELAY);
+    if (lastDataMs > 0 && currentSpeed_mps > 0)
+        totalDistance_m += currentSpeed_mps * ((now - lastDataMs) / 1000.0f);
+    currentSpeed_mps = spd_mps;
+    currentCadence   = cadence;
+    lastDataMs       = now;
+    float dist_snap  = totalDistance_m;
+    xSemaphoreGive(dataMutex);
+
+    sendRSCUpdate();
+    pushZigbee(spd_mps, cadence, dist_snap, speed_raw > 0);
+}
+
 // ── TREADMILL DATA CALLBACK ───────────────────────────────────────────────
 void notifyCallback(NimBLERemoteCharacteristic* pChar,
                     uint8_t* pData, size_t length, bool isNotify) {
@@ -141,25 +161,8 @@ void notifyCallback(NimBLERemoteCharacteristic* pChar,
 
     // Speed is at bytes 2-3 when More Data bit is clear (0.01 km/h units)
     uint16_t speed_raw = (uint16_t)pData[2] | ((uint16_t)pData[3] << 8);
-    float    speed_kmh = speed_raw / 100.0f;
-    float    spd_mps   = speed_kmh / 3.6f;
-    uint8_t  cadence   = (speed_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
-    Serial.printf("spd=%.2fkmh cad=%d\n", speed_kmh, cadence);
-
-    // Accumulate distance: integrate speed over time since last packet
-    unsigned long now = millis();
-    xSemaphoreTake(dataMutex, portMAX_DELAY);
-    if (lastDataMs > 0 && currentSpeed_mps > 0) {
-        totalDistance_m += currentSpeed_mps * ((now - lastDataMs) / 1000.0f);
-    }
-    currentSpeed_mps = spd_mps;
-    currentCadence   = cadence;
-    lastDataMs       = now;
-    float dist_snap  = totalDistance_m;
-    xSemaphoreGive(dataMutex);
-
-    sendRSCUpdate();
-    pushZigbee(spd_mps, cadence, dist_snap, speed_raw > 0);
+    Serial.printf("spd=%.2fkmh\n", speed_raw / 100.0f);
+    handleSpeedRaw(speed_raw);
 }
 
 // ── TREADMILL CLIENT CALLBACKS ────────────────────────────────────────────
@@ -273,25 +276,9 @@ void treadmillTask(void* param) {
                 // Bytes 4-5: set/target speed in 0.1 km/h units — logged for reference
                 uint16_t set_raw   = (uint16_t)d[4] | ((uint16_t)d[5] << 8);
                 uint16_t speed_raw = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
-                float    speed_kmh = speed_raw / 100.0f;
-                float    spd_mps   = speed_kmh / 3.6f;
-                uint8_t  cadence   = (speed_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
-                Serial.printf("TRST actual=%.2fkmh set=%.1fkmh cad=%d\n",
-                              speed_kmh, set_raw * 0.1f, cadence);
-
-                unsigned long now = millis();
-                xSemaphoreTake(dataMutex, portMAX_DELAY);
-                if (lastDataMs > 0 && currentSpeed_mps > 0) {
-                    totalDistance_m += currentSpeed_mps * ((now - lastDataMs) / 1000.0f);
-                }
-                currentSpeed_mps = spd_mps;
-                currentCadence   = cadence;
-                lastDataMs       = now;
-                float dist_snap  = totalDistance_m;
-                xSemaphoreGive(dataMutex);
-
-                sendRSCUpdate();
-                pushZigbee(spd_mps, cadence, dist_snap, speed_raw > 0);
+                Serial.printf("TRST actual=%.2fkmh set=%.1fkmh\n",
+                              speed_raw / 100.0f, set_raw * 0.1f);
+                handleSpeedRaw(speed_raw);
             });
             Serial.printf("sub TRST: %d\n", ok);
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -306,24 +293,9 @@ void treadmillTask(void* param) {
                 Serial.println();
 
                 if (l >= 3 && d[0] == 0x08) {  // Target Speed Changed
-                    uint16_t spd_raw  = (uint16_t)d[1] | ((uint16_t)d[2] << 8);
-                    float    speed_kmh = spd_raw / 100.0f;
-                    float    spd_mps   = speed_kmh / 3.6f;
-                    uint8_t  cadence   = (spd_raw > 0) ? (uint8_t)(140 + speed_kmh * 3.0f) : 0;
-                    Serial.printf("FMST spd=%.2fkmh cad=%d\n", speed_kmh, cadence);
-
-                    unsigned long now = millis();
-                    xSemaphoreTake(dataMutex, portMAX_DELAY);
-                    if (lastDataMs > 0 && currentSpeed_mps > 0)
-                        totalDistance_m += currentSpeed_mps * ((now - lastDataMs) / 1000.0f);
-                    currentSpeed_mps = spd_mps;
-                    currentCadence   = cadence;
-                    lastDataMs       = now;
-                    float dist_snap  = totalDistance_m;
-                    xSemaphoreGive(dataMutex);
-
-                    sendRSCUpdate();
-                    pushZigbee(spd_mps, cadence, dist_snap, spd_raw > 0);
+                    uint16_t spd_raw = (uint16_t)d[1] | ((uint16_t)d[2] << 8);
+                    Serial.printf("FMST spd=%.2fkmh\n", spd_raw / 100.0f);
+                    handleSpeedRaw(spd_raw);
                 }
             });
             Serial.printf("sub FMST: %d\n", ok);
