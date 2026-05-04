@@ -32,7 +32,7 @@ To find the address, flash the `scanner/` or `explorer/` sketch and check the se
 
 ## Build
 
-Requires [arduino-cli](https://arduino.github.io/arduino-cli/) with the `esp32` core installed.
+Requires [arduino-cli](https://arduino.github.io/arduino-cli/) with the `esp32` core installed. A copy is bundled in `bin/` for convenience — substitute `arduino-cli` with `bin/arduino-cli` if you prefer not to install it system-wide.
 
 ```bash
 arduino-cli compile --fqbn "esp32:esp32:XIAO_ESP32C6:ZigbeeMode=ed,PartitionScheme=zigbee" titanbridge
