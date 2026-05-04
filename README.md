@@ -20,6 +20,16 @@ An ESP32-C6 firmware that bridges a **Titan treadmill** to a **Garmin watch** an
 - [Seeed XIAO ESP32-C6](https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/)
 - Titan treadmill (BLE address `c8:1f:c2:2a:90:40`)
 
+## Configuration
+
+Before flashing, update `TREADMILL_ADDR` at the top of `titanbridge/titanbridge.ino` to match your treadmill's BLE MAC address:
+
+```cpp
+static const char* TREADMILL_ADDR = "c8:1f:c2:2a:90:40";  // <- change this
+```
+
+To find the address, flash the `scanner/` or `explorer/` sketch and check the serial output (115200 baud) while the treadmill is powered on. The treadmill will appear as a BLE device — note its MAC address and update the constant above.
+
 ## Build
 
 Requires [arduino-cli](https://arduino.github.io/arduino-cli/) with the `esp32` core installed.

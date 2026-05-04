@@ -11,6 +11,8 @@
 #include "ep/ZigbeeOccupancySensor.h"
 
 // ── CONFIG ────────────────────────────────────────────────────────────────
+// Update TREADMILL_ADDR to match your treadmill's BLE MAC address.
+// Use the bundled explorer/ or scanner/ sketch to discover it.
 static const char* TREADMILL_ADDR = "c8:1f:c2:2a:90:40";
 static NimBLEUUID  ftmsServiceUUID("1826");      // Fitness Machine Service
 static NimBLEUUID  treadmillDataUUID("2ad3");    // Treadmill Data characteristic
