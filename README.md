@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="TitanBridge logo" width="150">
+</p>
+
 # TitanBridge
 
 An ESP32-C6 firmware that bridges a **Titan treadmill** to a **Garmin watch** and **Home Assistant**, since the treadmill has no native Garmin or FTMS support over a standard profile.
