@@ -6,6 +6,9 @@
 
 An ESP32-C6 firmware that bridges a **Titan treadmill** to a **Garmin watch** and **Home Assistant**, since the treadmill has no native Garmin or FTMS support over a standard profile.
 
+> **Personal project notice**
+> This is a personal project built for a specific hardware setup and shared as-is for anyone curious about a similar problem. It was developed with AI assistance (Claude). There is no warranty, no guarantee that it will work with your hardware, and no active support. Use it as a reference or starting point — but expect to adapt it to your own setup.
+
 ## Features
 
 - Reads real-time belt speed from the treadmill over BLE
